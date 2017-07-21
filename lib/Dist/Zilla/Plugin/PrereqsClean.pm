@@ -11,10 +11,20 @@ use MooseX::Types::Moose qw/Int/;
 
 use Module::CoreList 3.10;  # (try to keep this one current)
 use List::AllUtils qw(min max part);
+use MetaCPAN::Client;
 use version 0.77;
 
 with 'Dist::Zilla::Role::PrereqSource';
-with 'Dist::Zilla::Role::MetaCPANInterfacer';
+
+# TODO: Inject any useragents
+has mcpan => (
+    is => 'ro',
+    isa => 'MetaCPAN::Client',
+    lazy => 1,
+    default => sub {
+        MetaCPAN::Client->new()
+    },
+);
 
 has minimum_perl => (
    is      => 'ro',
@@ -218,34 +228,48 @@ sub register_prereqs {
 sub _mcpan_module2distro {
    my ($self, $module, $get_module_list) = @_;
 
-   # faster and less bulky than a straight module/$module pull
-   ### XXX: This should be replaced with a ->file() method when those
-   ### two pull requests of mine are put into CPAN...
    $self->log_debug("Checking module $module via MetaCPAN");
-   my $details = $self->mcpan->fetch("file/_search",
-      q      => 'module.name:"'.$module.'" AND status:latest AND module.authorized:true',
-      fields => 'distribution,release',
-      size   => 1,
+   my $search = $self->mcpan->file(
+      {
+         all => [
+            { 'module.name' => $module },
+            { status        => 'latest' },
+            { authorized    => 1 },
+         ],
+      },
+      {
+         fields => [qw/distribution release/],
+      }
    );
-   unless ($details && $details->{hits}{total}) {
+   unless ($search && $search->total) {
       $self->log("??? MetaCPAN can't even find module $module!");
       return undef;
    }
-   my ($distro, $release) = @{ $details->{hits}{hits}[0]{fields} }{qw(distribution release)};
+   my $file = $search->next;
+   my $distro = $file->distribution;
+   my $release = $file->release;
    return $distro unless $get_module_list;
 
    $self->log_debug("Checking release $release for module list via MetaCPAN");
-   $details = $self->mcpan->fetch("file/_search",
-      q      => 'release:"'.$release.'" AND module.name:* AND module.authorized:true',
-      fields => 'module.name',
-      size   => 500,
+   $search = $self->mcpan->file(
+      {
+        all => [
+           { release => $release },
+           { 'module.name' => '*' },
+           { authorized => 1 },
+        ],
+      }
    );
-   unless ($details && $details->{hits}{total}) {
+
+   unless ($search && $search->total) {
       $self->log("??? MetaCPAN can't find release $release (even after finding it earlier)!");
       return undef;
    }
 
-   my @modules = map { $_->{fields}{'module.name'} } @{ $details->{hits}{hits} };
+   my @modules;
+   while (my $m = $search->next) {
+      push @modules, $m->module->[0]{name};
+   }
    return ($distro, @modules);
 }
 
